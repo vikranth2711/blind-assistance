@@ -1,104 +1,87 @@
 import cv2
 import numpy as np
 import pyttsx3
+from ultralytics import YOLO
+from threading import Thread
+import time
 
-# ====================== FILE PATHS (REPLACE WITH YOURS) ====================== #
-# Replace these paths with the actual locations where you downloaded the files
-cfg = r"PATH_TO_YOLOV3_CFG\yolov3.cfg"  # Example: r"C:\Users\YourName\Downloads\yolov3.cfg"
-weights = r"PATH_TO_YOLOV3_WEIGHTS\yolov3.weights"  # Example: r"C:\Users\YourName\Downloads\yolov3.weights"
-coco_names = r"PATH_TO_COCO_NAMES\coco.names"  # Example: r"C:\Users\YourName\Downloads\coco.names"
-# ============================================================================ #
-
-# Load YOLO model
-net = cv2.dnn.readNet(weights, cfg)
-
-# Load class labels from coco.names
-classes = []
-with open(coco_names, "r") as f:
-    classes = [line.strip() for line in f.readlines()]
-
-# Set thresholds for object detection
-CONFIDENCE_THRESHOLD = 0.5  # Minimum confidence for a detection
-NMS_THRESHOLD = 0.4  # Non-Maximum Suppression threshold
+# Load YOLOv8 model (pre-trained on COCO dataset)
+model = YOLO("yolov8n.pt")  # Nano model for real-time performance
 
 # Initialize text-to-speech engine
 voice = pyttsx3.init()
+voice.setProperty('rate', 150)  # Speed of speech
+voice.setProperty('volume', 0.9)  # Volume (0.0 to 1.0)
 
 # Open webcam (0 for default camera)
 cap = cv2.VideoCapture(0)
 
-# Retrieve YOLO output layer names (ensures compatibility with different OpenCV versions)
-layer_names = net.getLayerNames()
-try:
-    output_layers = net.getUnconnectedOutLayersNames()
-except AttributeError:
-    output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
-
-# Set frame processing frequency (skip frames for better performance)
+# Set frame processing frequency and resolution
 FRAME_SKIP = 2  # Process every 2nd frame
+FRAME_WIDTH, FRAME_HEIGHT = 640, 480  # Reduced resolution for performance
+CONFIDENCE_THRESHOLD = 0.5  # Minimum confidence for detections
+SPEECH_INTERVAL = 5  # Seconds between same object announcements
+
+# Dictionary to track last spoken time for each object
+last_spoken = {}
+
+# Initialize frame counter
 frame_count = 0
+
+def speak_objects(objects):
+    """Run text-to-speech in a separate thread."""
+    for obj, direction in objects:
+        voice.say(f"{obj} on the {direction}")
+    voice.runAndWait()
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break  # Exit if no frame is captured
 
+    # Resize frame for faster processing
+    frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
+
     # Process only every FRAME_SKIP-th frame
     if frame_count % FRAME_SKIP == 0:
-        height, width = frame.shape[:2]
+        # Perform YOLOv8 inference
+        results = model(frame, conf=CONFIDENCE_THRESHOLD)[0]
 
-        # Convert frame to blob (YOLO format)
-        blob = cv2.dnn.blobFromImage(frame, 1/255, (416, 416), (0, 0, 0), swapRB=True, crop=False)
-        net.setInput(blob)
+        detected_objects = []  # Store (object, direction) tuples
+        # Iterate over detections
+        for box in results.boxes:
+            # Get bounding box coordinates, confidence, and class
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            confidence = box.conf.item()
+            class_id = int(box.cls.item())
+            obj_name = results.names[class_id]
+            label = f"{obj_name}: {confidence:.2f}"
 
-        # Run forward pass through YOLO
-        outs = net.forward(output_layers)
+            # Determine direction based on bounding box center
+            center_x = (x1 + x2) // 2
+            frame_center = FRAME_WIDTH // 2
+            direction = (
+                "left" if center_x < frame_center - 50
+                else "right" if center_x > frame_center + 50
+                else "center"
+            )
 
-        class_ids = []  # Store detected object class IDs
-        confidences = []  # Store confidence scores
-        boxes = []  # Store bounding box coordinates
+            # Draw bounding box and label
+            color = (0, 255, 0)  # Green color for bounding box
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, f"{label} ({direction})", (x1, y1 - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-        # Iterate over YOLO outputs
-        for out in outs:
-            for detection in out:
-                scores = detection[5:]  # Class confidence scores
-                class_id = np.argmax(scores)  # Get highest scoring class
-                confidence = scores[class_id]  # Get confidence value
+            # Add object to list if not recently spoken
+            if obj_name not in last_spoken or (time.time() - last_spoken[obj_name]) > SPEECH_INTERVAL:
+                detected_objects.append((obj_name, direction))
+                last_spoken[obj_name] = time.time()
 
-                if confidence > CONFIDENCE_THRESHOLD:
-                    # Get bounding box coordinates
-                    center_x, center_y, w, h = (detection[0:4] * np.array([width, height, width, height])).astype(int)
-                    x = int(center_x - w / 2)
-                    y = int(center_y - h / 2)
+        # Run text-to-speech in a separate thread if objects detected
+        if detected_objects:
+            Thread(target=speak_objects, args=(detected_objects,)).start()
 
-                    boxes.append([x, y, w, h])
-                    confidences.append(float(confidence))
-                    class_ids.append(class_id)
-
-        # Apply Non-Maximum Suppression (NMS) to reduce redundant boxes
-        indices = cv2.dnn.NMSBoxes(boxes, confidences, CONFIDENCE_THRESHOLD, NMS_THRESHOLD)
-
-        # Draw bounding boxes and labels
-        detected_objects = set()
-        if len(indices) > 0:
-            for i in indices.flatten():
-                x, y, w, h = boxes[i]
-                label = f"{classes[class_ids[i]]}: {confidences[i]:.2f}"
-                color = (0, 255, 0)  # Green color for bounding box
-
-                # Draw rectangle and label
-                cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-                cv2.putText(frame, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-                # Add detected object to the set
-                detected_objects.add(classes[class_ids[i]])
-
-        # Convert detected object names to speech
-        for obj in detected_objects:
-            voice.say(obj)  # Speak detected object name
-        voice.runAndWait()
-
-        print("Detected:", ", ".join(detected_objects))
+        print("Detected:", ", ".join([f"{obj} ({dir})" for obj, dir in detected_objects]))
 
     frame_count += 1  # Increment frame count
 
