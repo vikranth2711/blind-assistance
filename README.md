@@ -104,10 +104,6 @@ Contributions are welcome! Feel free to open issues or submit pull requests. �
 3. Make your changes and test thoroughly
 4. Submit a pull request with detailed description
 
-## 📄 License
-
-This project is open source. Please check the repository for license details.
-
 ## 🙏 Acknowledgments
 
 - [Ultralytics](https://ultralytics.com/) for YOLOv8
